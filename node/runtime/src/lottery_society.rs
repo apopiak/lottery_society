@@ -21,7 +21,7 @@ decl_event!(
 
 // storage for this runtime module
 decl_storage! {
-  trait Store for Module<T: Trait> as Template {
+  trait Store for Module<T: Trait> as LotterySociety {
     TotalSupply get(fn total_supply) config(): u64 = 21000000;
 
     BalanceOf get(fn balance_of): map hasher(blake2_256) T::AccountId => u64;
