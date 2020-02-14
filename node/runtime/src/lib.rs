@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 // `construct_runtime!` does a lot of recursion and requires us to increase the limit to 256.
-#![recursion_limit="256"]
+#![recursion_limit = "256"]
 
 // Make the WASM binary available.
 #[cfg(feature = "std")]
@@ -238,6 +238,8 @@ impl sudo::Trait for Runtime {
 /// Used for the module in `./lottery_society.rs`
 impl lottery_society::Trait for Runtime {
 	type Event = Event;
+	type Currency = balances::Module<Runtime>;
+	type Randomness = randomness_collective_flip::Module<Runtime>;
 }
 
 construct_runtime!(
