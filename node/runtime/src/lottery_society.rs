@@ -1,12 +1,13 @@
 use frame_support::{
 	debug::{self, native},
 	decl_event, decl_module, decl_storage, dispatch, ensure,
-	traits::{Currency, ExistenceRequirement::KeepAlive, Randomness},
+	traits::{Currency, ExistenceRequirement::KeepAlive, Get, Randomness},
 };
-use sp_core::{Blake2Hasher, Decode, Encode, Hasher};
+use sp_core::{Decode, Encode};
 use sp_runtime::{
 	traits::{
-		AccountIdConversion, CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, SimpleArithmetic,
+		AccountIdConversion, CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, Hash,
+		SimpleArithmetic, Zero,
 	},
 	DispatchResult, ModuleId,
 };
@@ -22,6 +23,9 @@ pub trait Trait: system::Trait {
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 	type Currency: Currency<Self::AccountId>;
 	type Randomness: Randomness<Self::Hash>;
+
+	/// The number of blocks between payout periods.
+	type PayoutPeriod: Get<Self::BlockNumber>;
 }
 
 decl_event!(
@@ -98,70 +102,21 @@ decl_module! {
 
 			ensure!(founder == Self::founder(), "only the founder can trigger the lottery");
 
-			let pot_account = Self::account_id();
-			let pot = T::Currency::free_balance(&pot_account);
-
-			let lottery_amount = pot.checked_div(&10.into())
-				.expect("division by 10 should always be possible for any value of the balance");
-
-			let nonce = <Nonce>::get();
-			let seed = T::Randomness::random_seed();
-			let random_num = (seed, &founder, nonce)
-				.using_encoded(|b| Blake2Hasher::hash(b))
-				.using_encoded(|mut b| u64::decode(&mut b))
-				.map_err(|_| "randomness failed")?;
-
-			let members = <Members<T>>::get();
-			ensure!(members.len() > 0, "there needs to be at least 1 member to the lottery");
-
-			let index = (random_num % (members.len() as u64)) as usize;
-			native::info!("random: {}, random_index: {}", random_num, index);
-			let random_member = &members[index];
-
-			let _ = T::Currency::transfer(&pot_account, random_member, lottery_amount, KeepAlive)?;
-
-			Self::deposit_event(RawEvent::Winner(random_member.clone(), lottery_amount));
+			Self::run_lottery(10.into());
 
 			Ok(())
 		}
 
-		fn on_initialize(_n: T::BlockNumber) {
-			let pot_account = Self::account_id();
-			let pot = T::Currency::free_balance(&pot_account);
-
-			if Self::founder() == T::AccountId::default() || pot < 1000.into() {
+		fn on_initialize(n: T::BlockNumber) {
+			if Self::founder() == T::AccountId::default() {
 				native::info!("LOTTERY: not executing on_finalize");
 				return;
 			}
 
-			let lottery_amount = pot.checked_div(&1000.into())
-				.expect("division by 10 should always be possible for any value of the balance");
-
-			if lottery_amount < 100.into() {
-				native::info!("LOTTERY: lottey too small, skipping round");
-				return;
+			if (n % T::PayoutPeriod::get()).is_zero() {
+				Self::run_lottery(1000.into());
 			}
 
-			let nonce = <Nonce>::get();
-			let seed = T::Randomness::random_seed(); //<system::Module<T>>::random_seed()
-			let random_num = match (seed, nonce)
-				.using_encoded(|b| Blake2Hasher::hash(b))
-				.using_encoded(|mut b| u64::decode(&mut b))
-				.map_err(|_| "randomness failed") {
-					Ok(num) => num,
-					Err(_) => return,
-				};
-
-			let members = <Members<T>>::get();
-			assert!(members.len() > 0, "there needs to be at least 1 member to the lottery");
-
-			let index = (random_num % (members.len() as u64)) as usize;
-			native::info!("random: {}, random_index: {}", random_num, index);
-			let random_member = &members[index];
-
-			if T::Currency::transfer(&pot_account, random_member, lottery_amount, KeepAlive).is_ok() {
-				Self::deposit_event(RawEvent::Winner(random_member.clone(), lottery_amount));
-			};
 		}
 
 		// transfer tokens from one account to another
@@ -208,5 +163,48 @@ impl<T: Trait> Module<T> {
 
 	pub fn is_member(acc: &T::AccountId) -> bool {
 		Self::members().contains(acc)
+	}
+
+	fn run_lottery(fraction: BalanceOf<T>) {
+		let pot_account = Self::account_id();
+		let pot = T::Currency::free_balance(&pot_account);
+
+		assert!(
+			fraction > 1.into(),
+			"only allow drawing out less than the whole pot"
+		);
+		let lottery_amount = pot
+			.checked_div(&fraction)
+			.expect("should always be possible for any value of the balance");
+
+		if lottery_amount < 100.into() {
+			native::info!("LOTTERY: lottey too small, skipping round");
+			return;
+		}
+
+		let nonce = <Nonce>::get();
+		let seed = T::Randomness::random_seed();
+		let random_num = match (seed, nonce)
+			.using_encoded(|b| T::Hashing::hash(b))
+			.using_encoded(|mut b| u64::decode(&mut b))
+			.map_err(|_| "randomness failed")
+		{
+			Ok(num) => num,
+			Err(_) => return,
+		};
+
+		let members = <Members<T>>::get();
+		assert!(
+			members.len() > 0,
+			"there needs to be at least 1 member to the lottery"
+		);
+
+		let index = (random_num % (members.len() as u64)) as usize;
+		native::info!("random: {}, random_index: {}", random_num, index);
+		let random_member = &members[index];
+
+		if T::Currency::transfer(&pot_account, random_member, lottery_amount, KeepAlive).is_ok() {
+			Self::deposit_event(RawEvent::Winner(random_member.clone(), lottery_amount));
+		};
 	}
 }

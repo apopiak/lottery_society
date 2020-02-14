@@ -235,11 +235,17 @@ impl sudo::Trait for Runtime {
 	type Proposal = Call;
 }
 
+parameter_types! {
+	pub const PayoutPeriod: BlockNumber = 3;
+}
+
 /// Used for the module in `./lottery_society.rs`
 impl lottery_society::Trait for Runtime {
 	type Event = Event;
 	type Currency = balances::Module<Runtime>;
 	type Randomness = randomness_collective_flip::Module<Runtime>;
+
+	type PayoutPeriod = PayoutPeriod;
 }
 
 construct_runtime!(
@@ -256,9 +262,9 @@ construct_runtime!(
 		Balances: balances,
 		TransactionPayment: transaction_payment::{Module, Storage},
 		Sudo: sudo,
+		RandomnessCollectiveFlip: randomness_collective_flip::{Module, Call, Storage},
 		// Used for the module in `./lottery_society.rs`
 		LotterySociety: lottery_society::{Module, Call, Storage, Event<T>},
-		RandomnessCollectiveFlip: randomness_collective_flip::{Module, Call, Storage},
 	}
 );
 
