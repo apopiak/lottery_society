@@ -24,6 +24,9 @@ pub trait Trait: system::Trait {
 	type Currency: Currency<Self::AccountId>;
 	type Randomness: Randomness<Self::Hash>;
 
+	type ExistentialDeposit: Get<BalanceOf<Self>>;
+	type MinimumPayout: Get<BalanceOf<Self>>;
+
 	/// The number of blocks between payout periods.
 	type PayoutPeriod: Get<Self::BlockNumber>;
 }
@@ -47,6 +50,8 @@ decl_storage! {
 		Founder get(fn founder): T::AccountId;
 
 		Members get(fn members): Vec<T::AccountId>;
+
+		PayingMembers get(fn paying_members): Vec<T::AccountId>;
 
 		// Pot get(fn pot): BalanceOf<T>;
 
@@ -91,7 +96,11 @@ decl_module! {
 
 			if !Self::is_member(&joiner) {
 				<Members<T>>::append(vec![&joiner])?;
-				Self::deposit_event(RawEvent::MemberAdded(joiner));
+				Self::deposit_event(RawEvent::MemberAdded(joiner.clone()));
+			}
+
+			if !Self::paying_members().contains(&joiner) {
+				<PayingMembers<T>>::append(vec![&joiner])?;
 			}
 
 			Ok(())
@@ -109,50 +118,16 @@ decl_module! {
 
 		fn on_initialize(n: T::BlockNumber) {
 			if Self::founder() == T::AccountId::default() {
-				native::info!("LOTTERY: not executing on_finalize");
+				native::info!("LOTTERY: no founder --> not initialized --> not executing");
 				return;
 			}
 
 			if (n % T::PayoutPeriod::get()).is_zero() {
-				Self::run_lottery(1000.into());
+				Self::kick_non_paying_member();
+				Self::run_lottery(100.into());
+				<PayingMembers<T>>::put(Vec::<T::AccountId>::new());
 			}
-
 		}
-
-		// transfer tokens from one account to another
-		// fn transfer(origin, to: T::AccountId, value: u64) -> DispatchResult {
-		// 	let sender = ensure_signed(origin)?;
-		// 	let sender_balance = Self::balance_of(sender.clone());
-		// 	ensure!(sender_balance >= value, "Not enough balance.");
-
-		// 	let updated_from_balance = sender_balance.checked_sub(value).ok_or("overflow in calculating balance")?;
-		// 	let receiver_balance = Self::balance_of(to.clone());
-		// 	let updated_to_balance = receiver_balance.checked_add(value).ok_or("overflow in calculating balance")?;
-
-		// 	// reduce sender's balance
-		// 	<BalanceOf<T>>::insert(sender, updated_from_balance);
-
-		// 	// increase receiver's balance
-		// 	<BalanceOf<T>>::insert(to.clone(), updated_to_balance);
-
-		// 	Ok(())
-		// }
-
-		// fn add_member(origin) -> DispatchResult {
-		// 	let who = ensure_signed(origin)?;
-
-		// 	// Note: We use a 1-based (instead of 0-based) list here
-		// 	// Note: Handle overflow here in production code!
-		// 	let new_count = <LargestIndex>::get() + 1;
-		// 	// insert new member past the end of the list
-		// 	<TheList<T>>::insert(new_count, &who);
-		// 	// store the incremented count
-		// 	<LargestIndex>::put(new_count);
-
-		// 	Self::deposit_event(RawEvent::MemberAdded(who));
-
-		// 	Ok(())
-		// }
 	}
 }
 
@@ -165,9 +140,30 @@ impl<T: Trait> Module<T> {
 		Self::members().contains(acc)
 	}
 
+	fn kick_non_paying_member() {
+		let mut members = Self::members();
+		let paying = Self::paying_members();
+		let non_paying: Vec<(usize, &T::AccountId)> = members
+			.iter()
+			.enumerate()
+			.filter(|(i, m)| !paying.contains(m))
+			.collect();
+		Self::random_index(non_paying.len())
+			.map(|i| non_paying[i].0)
+			.map(|i| {
+				members.remove(i);
+				<Members<T>>::put(members);
+			});
+	}
+
 	fn run_lottery(fraction: BalanceOf<T>) {
 		let pot_account = Self::account_id();
 		let pot = T::Currency::free_balance(&pot_account);
+
+		if pot < (T::ExistentialDeposit::get() * 10.into()).into() {
+			native::info!("LOTTERY: pot too small, skipping payout");
+			return;
+		}
 
 		assert!(
 			fraction > 1.into(),
@@ -177,34 +173,48 @@ impl<T: Trait> Module<T> {
 			.checked_div(&fraction)
 			.expect("should always be possible for any value of the balance");
 
-		if lottery_amount < 100.into() {
-			native::info!("LOTTERY: lottey too small, skipping round");
+		if lottery_amount < T::MinimumPayout::get() {
+			native::info!("LOTTERY: payout too small, skipping round");
 			return;
 		}
 
-		let nonce = <Nonce>::get();
-		let seed = T::Randomness::random_seed();
-		let random_num = match (seed, nonce)
-			.using_encoded(|b| T::Hashing::hash(b))
-			.using_encoded(|mut b| u64::decode(&mut b))
-			.map_err(|_| "randomness failed")
-		{
-			Ok(num) => num,
-			Err(_) => return,
+		let members = Self::members();
+		let random_member = Self::random_member(&members);
+		let random_member = match random_member {
+			Ok(member) => member,
+			Err(msg) => {
+				native::info!("LOTTERY: choosing random member failed, {}", msg);
+				return;
+			}
 		};
 
-		let members = <Members<T>>::get();
-		assert!(
-			members.len() > 0,
-			"there needs to be at least 1 member to the lottery"
+		native::info!(
+			"LOTTERY: Winner Winner, chicken dinner! {:?}, {:?}",
+			random_member.clone(),
+			lottery_amount
 		);
-
-		let index = (random_num % (members.len() as u64)) as usize;
-		native::info!("random: {}, random_index: {}", random_num, index);
-		let random_member = &members[index];
-
-		if T::Currency::transfer(&pot_account, random_member, lottery_amount, KeepAlive).is_ok() {
+		if T::Currency::transfer(&pot_account, &random_member, lottery_amount, KeepAlive).is_ok() {
 			Self::deposit_event(RawEvent::Winner(random_member.clone(), lottery_amount));
 		};
+	}
+
+	fn random_member(members: &[T::AccountId]) -> Result<T::AccountId, &'static str> {
+		let index = Self::random_index(members.len())?;
+		Ok(members[index].clone())
+	}
+
+	fn random_index(len: usize) -> Result<usize, &'static str> {
+		ensure!(len > 0, "need more than 1 option for random index");
+
+		let nonce = <Nonce>::get();
+		let seed = T::Randomness::random_seed();
+		let random_num = (seed, nonce)
+			.using_encoded(|b| T::Hashing::hash(b))
+			.using_encoded(|mut b| u64::decode(&mut b))
+			.map_err(|_| "randomness failed")?;
+
+		<Nonce>::put(nonce + 1);
+
+		Ok((random_num % (len as u64)) as usize)
 	}
 }

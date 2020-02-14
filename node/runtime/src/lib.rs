@@ -245,6 +245,9 @@ impl lottery_society::Trait for Runtime {
 	type Currency = balances::Module<Runtime>;
 	type Randomness = randomness_collective_flip::Module<Runtime>;
 
+	type ExistentialDeposit = ExistentialDeposit;
+	type MinimumPayout = ExistentialDeposit;
+
 	type PayoutPeriod = PayoutPeriod;
 }
 
