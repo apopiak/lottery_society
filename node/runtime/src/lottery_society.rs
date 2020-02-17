@@ -82,6 +82,7 @@ decl_module! {
 
 			let _ = T::Currency::transfer(&founder, &Self::account_id(), initial_pot, KeepAlive)?;
 			<Members<T>>::put(vec![&founder]);
+			<PayingMembers<T>>::put(vec![&founder]);
 			<Founder<T>>::put(&founder);
 
 			Self::deposit_event(RawEvent::Founded(founder, initial_pot));
@@ -118,13 +119,14 @@ decl_module! {
 
 		fn on_initialize(n: T::BlockNumber) {
 			if Self::founder() == T::AccountId::default() {
-				native::info!("LOTTERY: no founder --> not initialized --> not executing");
+				native::debug!(target: "lottery", "no founder --> not initialized --> not executing");
 				return;
 			}
 
 			if (n % T::PayoutPeriod::get()).is_zero() {
 				Self::kick_non_paying_member();
 				Self::run_lottery(100.into());
+				// clear paying members vec
 				<PayingMembers<T>>::put(Vec::<T::AccountId>::new());
 			}
 		}
@@ -146,14 +148,20 @@ impl<T: Trait> Module<T> {
 		let non_paying: Vec<(usize, &T::AccountId)> = members
 			.iter()
 			.enumerate()
-			.filter(|(i, m)| !paying.contains(m))
+			.filter(|(_i, m)| !paying.contains(m))
 			.collect();
-		Self::random_index(non_paying.len())
+		match Self::random_index(non_paying.len())
 			.map(|i| non_paying[i].0)
 			.map(|i| {
-				members.remove(i);
+				let removed = members.remove(i);
+				native::debug!(target: "lottery", "removed {:?}", removed);
 				<Members<T>>::put(members);
-			});
+			}) {
+			Ok(_) => {}
+			Err(msg) => {
+				native::warn!(target: "lottery", "choosing random index failed, {}", msg);
+			}
+		};
 	}
 
 	fn run_lottery(fraction: BalanceOf<T>) {
@@ -161,7 +169,7 @@ impl<T: Trait> Module<T> {
 		let pot = T::Currency::free_balance(&pot_account);
 
 		if pot < (T::ExistentialDeposit::get() * 10.into()).into() {
-			native::info!("LOTTERY: pot too small, skipping payout");
+			native::debug!(target: "lottery", "pot too small, skipping payout");
 			return;
 		}
 
@@ -169,12 +177,12 @@ impl<T: Trait> Module<T> {
 			fraction > 1.into(),
 			"only allow drawing out less than the whole pot"
 		);
-		let lottery_amount = pot
-			.checked_div(&fraction)
-			.expect("should always be possible for any value of the balance");
+		let lottery_amount = pot.checked_div(&fraction).expect(
+			"division by non-zero should always be possible for any value of the balance; qed",
+		);
 
 		if lottery_amount < T::MinimumPayout::get() {
-			native::info!("LOTTERY: payout too small, skipping round");
+			native::debug!(target: "lottery", "payout too small, skipping round");
 			return;
 		}
 
@@ -183,13 +191,13 @@ impl<T: Trait> Module<T> {
 		let random_member = match random_member {
 			Ok(member) => member,
 			Err(msg) => {
-				native::info!("LOTTERY: choosing random member failed, {}", msg);
+				native::warn!(target: "lottery", "choosing random member failed, {}", msg);
 				return;
 			}
 		};
 
-		native::info!(
-			"LOTTERY: Winner Winner, chicken dinner! {:?}, {:?}",
+		native::debug!(
+			target: "lottery", "Winner Winner, chicken dinner! {:?}, {:?}",
 			random_member.clone(),
 			lottery_amount
 		);
