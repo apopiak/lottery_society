@@ -236,7 +236,8 @@ impl sudo::Trait for Runtime {
 }
 
 parameter_types! {
-	pub const PayoutPeriod: BlockNumber = 3;
+	pub const PayoutPeriod: BlockNumber = 5;
+	pub const MinimumMemberCount: usize = 3;
 }
 
 /// Used for the module in `./lottery_society.rs`
@@ -249,6 +250,7 @@ impl lottery_society::Trait for Runtime {
 	type MinimumPayout = ExistentialDeposit;
 
 	type PayoutPeriod = PayoutPeriod;
+	type MinimumMemberCount = MinimumMemberCount;
 }
 
 construct_runtime!(

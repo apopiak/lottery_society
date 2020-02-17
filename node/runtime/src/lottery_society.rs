@@ -29,6 +29,7 @@ pub trait Trait: system::Trait {
 
 	/// The number of blocks between payout periods.
 	type PayoutPeriod: Get<Self::BlockNumber>;
+	type MinimumMemberCount: Get<usize>;
 }
 
 decl_event!(
@@ -40,6 +41,7 @@ decl_event!(
 		Founded(AccountId, Balance),
 		MemberAdded(AccountId),
 		MemberRemoved(AccountId),
+		IsPayingMember(AccountId),
 		Winner(AccountId, Balance),
 	}
 );
@@ -47,22 +49,10 @@ decl_event!(
 // storage for this runtime module
 decl_storage! {
 	trait Store for Module<T: Trait> as LotterySociety {
-		Founder get(fn founder): T::AccountId;
+		WasFounded get(fn was_founded): bool;
 
 		Members get(fn members): Vec<T::AccountId>;
-
 		PayingMembers get(fn paying_members): Vec<T::AccountId>;
-
-		// Pot get(fn pot): BalanceOf<T>;
-
-		// TotalSupply get(fn total_supply) config(): u64 = 21000000;
-
-		// BalanceOf get(fn balance_of): map hasher(blake2_256) T::AccountId => u64;
-
-		// TheList: map hasher(blake2_256) u32 => T::AccountId;
-		// LargestIndex: u32;
-
-		// TheLinkedList: linked_map hasher(blake2_256) u32 => T::AccountId;
 
 		Nonce: u64;
 	}
@@ -73,44 +63,34 @@ decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 		fn deposit_event() = default;
 
-		// initialize the society
-		// transfers initial pot amount of currency to the society
-		pub fn found(origin, initial_pot: BalanceOf<T>) -> DispatchResult {
-			let founder = ensure_signed(origin)?;
-
-			ensure!(Self::members().is_empty(), "can only found the society if it does not exist == no members");
-
-			let _ = T::Currency::transfer(&founder, &Self::account_id(), initial_pot, KeepAlive)?;
-			<Members<T>>::put(vec![&founder]);
-			<PayingMembers<T>>::put(vec![&founder]);
-			<Founder<T>>::put(&founder);
-
-			Self::deposit_event(RawEvent::Founded(founder, initial_pot));
-
-			Ok(())
-		}
-
-		pub fn enter_lottery(origin, bid: BalanceOf<T>) -> DispatchResult {
+		pub fn enter_lottery(origin, bet: BalanceOf<T>) -> DispatchResult {
 			let joiner = ensure_signed(origin)?;
 
-			let _ = T::Currency::transfer(&joiner, &Self::account_id(), bid, KeepAlive)?;
+			let _ = T::Currency::transfer(&joiner, &Self::account_id(), bet, KeepAlive)?;
+
+			if !Self::was_founded() {
+				<WasFounded>::put(true);
+				Self::deposit_event(RawEvent::Founded(joiner.clone(), bet));
+			}
 
 			if !Self::is_member(&joiner) {
-				<Members<T>>::append(vec![&joiner])?;
+				<Members<T>>::append_or_put(vec![&joiner]);
 				Self::deposit_event(RawEvent::MemberAdded(joiner.clone()));
 			}
 
-			if !Self::paying_members().contains(&joiner) {
-				<PayingMembers<T>>::append(vec![&joiner])?;
+			if !Self::is_paying_member(&joiner) {
+				<PayingMembers<T>>::append_or_put(vec![&joiner]);
+				Self::deposit_event(RawEvent::IsPayingMember(joiner.clone()));
 			}
 
 			Ok(())
 		}
 
 		pub fn trigger_lottery(origin) -> DispatchResult {
-			let founder = ensure_signed(origin)?;
+			let sender = ensure_signed(origin)?;
 
-			ensure!(founder == Self::founder(), "only the founder can trigger the lottery");
+			ensure!(Self::was_founded(), "can only trigger lottery if it was founded");
+			ensure!(Self::is_paying_member(&sender), "only paying members can trigger lottery");
 
 			Self::run_lottery(10.into());
 
@@ -118,8 +98,8 @@ decl_module! {
 		}
 
 		fn on_initialize(n: T::BlockNumber) {
-			if Self::founder() == T::AccountId::default() {
-				native::debug!(target: "lottery", "no founder --> not initialized --> not executing");
+			if !Self::was_founded() {
+				native::info!(target: "lottery", "not founded --> not executing");
 				return;
 			}
 
@@ -142,8 +122,16 @@ impl<T: Trait> Module<T> {
 		Self::members().contains(acc)
 	}
 
+	pub fn is_paying_member(acc: &T::AccountId) -> bool {
+		Self::paying_members().contains(acc)
+	}
+
 	fn kick_non_paying_member() {
 		let mut members = Self::members();
+		if members.len() <= T::MinimumMemberCount::get() {
+			native::info!(target:"lottery", "at or below minimum member count --> not removing anyone");
+			return;
+		}
 		let paying = Self::paying_members();
 		let non_paying: Vec<(usize, &T::AccountId)> = members
 			.iter()
@@ -154,7 +142,8 @@ impl<T: Trait> Module<T> {
 			.map(|i| non_paying[i].0)
 			.map(|i| {
 				let removed = members.remove(i);
-				native::debug!(target: "lottery", "removed {:?}", removed);
+				native::info!(target: "lottery", "removed {:?}", removed.clone());
+				Self::deposit_event(RawEvent::MemberRemoved(removed));
 				<Members<T>>::put(members);
 			}) {
 			Ok(_) => {}
@@ -169,7 +158,7 @@ impl<T: Trait> Module<T> {
 		let pot = T::Currency::free_balance(&pot_account);
 
 		if pot < (T::ExistentialDeposit::get() * 10.into()).into() {
-			native::debug!(target: "lottery", "pot too small, skipping payout");
+			native::info!(target: "lottery", "pot too small, skipping payout");
 			return;
 		}
 
@@ -182,7 +171,7 @@ impl<T: Trait> Module<T> {
 		);
 
 		if lottery_amount < T::MinimumPayout::get() {
-			native::debug!(target: "lottery", "payout too small, skipping round");
+			native::info!(target: "lottery", "payout too small, skipping round");
 			return;
 		}
 
@@ -196,7 +185,7 @@ impl<T: Trait> Module<T> {
 			}
 		};
 
-		native::debug!(
+		native::info!(
 			target: "lottery", "Winner Winner, chicken dinner! {:?}, {:?}",
 			random_member.clone(),
 			lottery_amount
